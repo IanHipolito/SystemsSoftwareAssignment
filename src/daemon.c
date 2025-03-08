@@ -30,44 +30,57 @@ static bool manual_operation_triggered = false;
 
 // Write PID file
 static bool write_pid_file(void) {
-    // Print the current working directory for debugging
-    char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        syslog(LOG_INFO, "Current working directory: %s", cwd);
-    } else {
-        syslog(LOG_ERR, "Failed to get current directory: %s", strerror(errno));
-    }
-
-    FILE *f = fopen(PID_FILE, "w");
-    if (f == NULL) {
-        syslog(LOG_ERR, "Failed to create PID file '%s': %s", PID_FILE, strerror(errno));
-        return false;
+    // Try multiple potential paths
+    const char* pid_paths[] = {
+        PID_FILE,           // Configured path
+        "./company_daemon.pid",  // Current directory
+        "/var/run/company_daemon.pid",  // Standard system pid directory
+        "/run/company_daemon.pid"       // Alternative system pid directory
+    };
+    
+    for (size_t i = 0; i < sizeof(pid_paths) / sizeof(pid_paths[0]); i++) {
+        FILE *f = fopen(pid_paths[i], "w");
+        if (f != NULL) {
+            pid_t pid = getpid();
+            fprintf(f, "%d\n", pid);
+            fclose(f);
+            
+            // Try to set permissions to be more permissive
+            chmod(pid_paths[i], 0666);
+            
+            syslog(LOG_INFO, "PID file written successfully: %s", pid_paths[i]);
+            return true;
+        } else {
+            syslog(LOG_WARNING, "Failed to create PID file %s: %s", 
+                   pid_paths[i], strerror(errno));
+        }
     }
     
-    fprintf(f, "%d\n", getpid());
-    fclose(f);
-    syslog(LOG_INFO, "PID file written successfully: %s", PID_FILE);
-    return true;
+    return false;
 }
 
 // Read PID from file
 static pid_t read_pid_file(void) {
-    FILE *f = fopen(PID_FILE, "r");
-    if (f == NULL) {
-        // Try local file instead
-        f = fopen("./company_daemon.pid", "r");
-        if (f == NULL) {
-            return 0;
+    const char* pid_paths[] = {
+        PID_FILE,
+        "./company_daemon.pid", 
+        "/var/run/company_daemon.pid",
+        "/run/company_daemon.pid"
+    };
+    
+    for (size_t i = 0; i < sizeof(pid_paths) / sizeof(pid_paths[0]); i++) {
+        FILE *f = fopen(pid_paths[i], "r");
+        if (f != NULL) {
+            pid_t pid;
+            if (fscanf(f, "%d", &pid) == 1) {
+                fclose(f);
+                return pid;
+            }
+            fclose(f);
         }
     }
     
-    pid_t pid;
-    if (fscanf(f, "%d", &pid) != 1) {
-        pid = 0;
-    }
-    
-    fclose(f);
-    return pid;
+    return 0;
 }
 
 // Remove PID file

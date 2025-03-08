@@ -11,6 +11,9 @@
 #include <errno.h>
 #include <syslog.h>
 #include <dirent.h>
+#include <pwd.h>
+#include <sys/types.h>
+#include <fcntl.h>
 
 #define MAX_LOG_LINE 1024
 
@@ -20,36 +23,94 @@ static FILE *change_log_file = NULL;
 // In init_logging() function
 void init_logging(void) {
     // Open system log
-    openlog("company_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);  // Add LOG_PERROR to see syslog messages on stderr
+    openlog("company_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);
+
+    // Get current user details for debugging
+    uid_t uid = getuid();
+    struct passwd *pw = getpwuid(uid);
     
-    // Try to open the log file, if it fails, create it in the current directory
-    log_file = fopen(LOG_FILE, "a");
-    if (log_file == NULL) {
-        // Try to create the log files in the current directory instead
-        syslog(LOG_WARNING, "Failed to open log file %s (%s), using local logs", LOG_FILE, strerror(errno));
-        log_file = fopen("./company_daemon.log", "a");
+    // Extensive logging about log file creation attempt
+    syslog(LOG_INFO, "Initializing logging for user: %s (UID: %d)", 
+           pw ? pw->pw_name : "unknown", uid);
+
+    // Print current working directory
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        syslog(LOG_INFO, "Current working directory: %s", cwd);
+    }
+
+    // Attempt to open/create log files with extensive error checking
+    int log_fd = open(LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (log_fd == -1) {
+        // Detailed error logging
+        syslog(LOG_ERR, "Failed to open main log file %s. Error: %s (errno: %d)", 
+               LOG_FILE, strerror(errno), errno);
+
+        // Check directory permissions
+        struct stat dir_stat;
+        if (stat("/var/log", &dir_stat) == -1) {
+            syslog(LOG_ERR, "Cannot stat /var/log directory: %s", strerror(errno));
+        } else {
+            syslog(LOG_INFO, "/var/log directory permissions: %o", dir_stat.st_mode & 0777);
+        }
+
+        // Try alternative log file location
+        char local_log_path[1024];
+        snprintf(local_log_path, sizeof(local_log_path), "%s/company_daemon.log", cwd);
+        log_fd = open(local_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        
+        if (log_fd == -1) {
+            syslog(LOG_CRIT, "Failed to create local log file %s. Error: %s", 
+                   local_log_path, strerror(errno));
+        } else {
+            syslog(LOG_WARNING, "Using local log file at %s", local_log_path);
+        }
+    }
+
+    // If we have a valid file descriptor, convert to FILE*
+    if (log_fd != -1) {
+        log_file = fdopen(log_fd, "a");
         if (log_file == NULL) {
-            syslog(LOG_ERR, "Failed to create local log file: %s", strerror(errno));
-            // Don't exit here, just continue without file logging
+            syslog(LOG_ERR, "Failed to convert log file descriptor to FILE*");
+            close(log_fd);
+        } else {
+            syslog(LOG_INFO, "Successfully opened log file");
+            fprintf(log_file, "=== Daemon Logging Started ===\n");
+            fflush(log_file);
         }
     }
-    
-    change_log_file = fopen(CHANGE_LOG_FILE, "a");
-    if (change_log_file == NULL) {
-        syslog(LOG_WARNING, "Failed to open change log file %s (%s), using local logs", CHANGE_LOG_FILE, strerror(errno));
-        change_log_file = fopen("./company_changes.log", "a");
+
+    // Similar process for change log file
+    int change_log_fd = open(CHANGE_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (change_log_fd == -1) {
+        syslog(LOG_ERR, "Failed to open change log file %s. Error: %s", 
+               CHANGE_LOG_FILE, strerror(errno));
+        
+        // Try local change log
+        char local_change_log_path[1024];
+        snprintf(local_change_log_path, sizeof(local_change_log_path), "%s/company_changes.log", cwd);
+        change_log_fd = open(local_change_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        
+        if (change_log_fd == -1) {
+            syslog(LOG_CRIT, "Failed to create local change log file. Error: %s", strerror(errno));
+        } else {
+            syslog(LOG_WARNING, "Using local change log file");
+        }
+    }
+
+    // Convert change log file descriptor to FILE*
+    if (change_log_fd != -1) {
+        change_log_file = fdopen(change_log_fd, "a");
         if (change_log_file == NULL) {
-            syslog(LOG_ERR, "Failed to create local change log file: %s", strerror(errno));
-            // Don't exit here, just continue without file logging
+            syslog(LOG_ERR, "Failed to convert change log file descriptor to FILE*");
+            close(change_log_fd);
+        } else {
+            syslog(LOG_INFO, "Successfully opened change log file");
         }
     }
-    
-    // Log daemon start
-    syslog(LOG_INFO, "Daemon started");
-    if (log_file) {
-        fprintf(log_file, "Daemon started\n");
-        fflush(log_file);
-    }
+
+    // Final initialization logging
+    syslog(LOG_INFO, "Logging initialization complete");
 }
 
 void close_logging(void) {

@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <unistd.h>
 
-// Message structure for IPC
+// Message structure for IPC (include space for additional data)
 typedef struct {
     long mtype;  // Message type
     TaskStatus status;
@@ -38,6 +38,7 @@ void cleanup_ipc(void) {
         } else {
             log_message(DAEMON_LOG_INFO, "IPC message queue removed");
         }
+        msgid = -1;
     }
 }
 
@@ -53,7 +54,9 @@ bool report_task_status(TaskType type, TaskStatus status) {
     
     // Send message
     if (msgsnd(msgid, &msg, sizeof(TaskStatus), 0) == -1) {
-        log_message(DAEMON_LOG_ERROR, "Failed to send task status: %s", strerror(errno));
+        // More detailed error logging
+        log_message(DAEMON_LOG_ERROR, "Failed to send task status. Error: %s (errno: %d)", 
+                    strerror(errno), errno);
         return false;
     }
     
