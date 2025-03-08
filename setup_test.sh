@@ -1,5 +1,3 @@
-# Create a setup_test.sh script with these contents
-cat > setup_test.sh << 'EOF'
 #!/bin/bash
 
 # Create necessary directories
@@ -38,10 +36,3 @@ echo "<?xml version=\"1.0\"?><report><data>Test data</data></report>" | sudo tee
 echo "<?xml version=\"1.0\"?><report><data>Test data</data></report>" | sudo tee /var/company/upload/distribution/distribution_${DATE}.xml > /dev/null
 
 echo "Test environment set up successfully"
-EOF
-
-# Make the script executable
-chmod +x setup_test.sh
-
-# Run the setup script
-./setup_test.sh

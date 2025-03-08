@@ -8,6 +8,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
 #include <syslog.h>
 #include <dirent.h>
 
@@ -16,35 +17,39 @@
 static FILE *log_file = NULL;
 static FILE *change_log_file = NULL;
 
+// In init_logging() function
 void init_logging(void) {
     // Open system log
-    openlog("company_daemon", LOG_PID, LOG_DAEMON);
+    openlog("company_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);  // Add LOG_PERROR to see syslog messages on stderr
     
     // Try to open the log file, if it fails, create it in the current directory
     log_file = fopen(LOG_FILE, "a");
     if (log_file == NULL) {
         // Try to create the log files in the current directory instead
-        syslog(LOG_WARNING, "Failed to open log file %s, using local logs", LOG_FILE);
+        syslog(LOG_WARNING, "Failed to open log file %s (%s), using local logs", LOG_FILE, strerror(errno));
         log_file = fopen("./company_daemon.log", "a");
         if (log_file == NULL) {
-            syslog(LOG_ERR, "Failed to create local log file");
-            exit(EXIT_FAILURE);
+            syslog(LOG_ERR, "Failed to create local log file: %s", strerror(errno));
+            // Don't exit here, just continue without file logging
         }
     }
     
     change_log_file = fopen(CHANGE_LOG_FILE, "a");
     if (change_log_file == NULL) {
-        syslog(LOG_WARNING, "Failed to open change log file %s, using local logs", CHANGE_LOG_FILE);
+        syslog(LOG_WARNING, "Failed to open change log file %s (%s), using local logs", CHANGE_LOG_FILE, strerror(errno));
         change_log_file = fopen("./company_changes.log", "a");
         if (change_log_file == NULL) {
-            syslog(LOG_ERR, "Failed to create local change log file");
-            fclose(log_file);
-            exit(EXIT_FAILURE);
+            syslog(LOG_ERR, "Failed to create local change log file: %s", strerror(errno));
+            // Don't exit here, just continue without file logging
         }
     }
     
     // Log daemon start
-    log_message(DAEMON_LOG_INFO, "Daemon started");
+    syslog(LOG_INFO, "Daemon started");
+    if (log_file) {
+        fprintf(log_file, "Daemon started\n");
+        fflush(log_file);
+    }
 }
 
 void close_logging(void) {

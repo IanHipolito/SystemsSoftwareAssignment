@@ -26,18 +26,27 @@ static pid_t daemon_pid = 0;
 static bool manual_operation_triggered = false;
 
 // PID file path
-#define PID_FILE "/var/run/company_daemon.pid"
+#define PID_FILE "./company_daemon.pid"
 
 // Write PID file
 static bool write_pid_file(void) {
+    // Print the current working directory for debugging
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        syslog(LOG_INFO, "Current working directory: %s", cwd);
+    } else {
+        syslog(LOG_ERR, "Failed to get current directory: %s", strerror(errno));
+    }
+
     FILE *f = fopen(PID_FILE, "w");
     if (f == NULL) {
-        log_message(DAEMON_LOG_ERROR, "Failed to create PID file: %s", strerror(errno));
+        syslog(LOG_ERR, "Failed to create PID file '%s': %s", PID_FILE, strerror(errno));
         return false;
     }
     
     fprintf(f, "%d\n", getpid());
     fclose(f);
+    syslog(LOG_INFO, "PID file written successfully: %s", PID_FILE);
     return true;
 }
 
@@ -86,7 +95,7 @@ static bool daemonize(void) {
     // Fork off the parent process
     pid = fork();
     if (pid < 0) {
-        log_message(DAEMON_LOG_ERROR, "Failed to fork first time: %s", strerror(errno));
+        fprintf(stderr, "Failed to fork first time: %s\n", strerror(errno));
         return false;
     }
     
@@ -97,7 +106,7 @@ static bool daemonize(void) {
     
     // Create a new session and become the session leader
     if (setsid() < 0) {
-        log_message(DAEMON_LOG_ERROR, "Failed to create a new session: %s", strerror(errno));
+        fprintf(stderr, "Failed to create a new session: %s\n", strerror(errno));
         return false;
     }
     
@@ -108,7 +117,7 @@ static bool daemonize(void) {
     // Fork again to ensure we are not a session leader
     pid = fork();
     if (pid < 0) {
-        log_message(DAEMON_LOG_ERROR, "Failed to fork second time: %s", strerror(errno));
+        fprintf(stderr, "Failed to fork second time: %s\n", strerror(errno));
         return false;
     }
     
@@ -121,18 +130,18 @@ static bool daemonize(void) {
     umask(0);
     
     // Change the current working directory
-    if (chdir("/") < 0) {
-        log_message(DAEMON_LOG_ERROR, "Failed to change working directory: %s", strerror(errno));
-        return false;
-    }
+    // if (chdir("/") < 0) {
+    //     fprintf(stderr, "Failed to change working directory: %s\n", strerror(errno));
+    //     return false;
+    // }
     
-    // Close all open file descriptors
-    for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--) {
-        close(x);
-    }
+    // Open the log file before closing file descriptors
+    openlog("company_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);
     
-    // Open the log file
-    openlog("company_daemon", LOG_PID, LOG_DAEMON);
+    // Close standard file descriptors but keep stderr for debugging
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    //close(STDERR_FILENO);  // Comment this out to keep stderr for debugging
     
     return true;
 }
