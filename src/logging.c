@@ -20,22 +20,31 @@ void init_logging(void) {
     // Open system log
     openlog("company_daemon", LOG_PID, LOG_DAEMON);
     
-    // Open log files
+    // Try to open the log file, if it fails, create it in the current directory
     log_file = fopen(LOG_FILE, "a");
     if (log_file == NULL) {
-        syslog(LOG_ERR, "Failed to open log file: %s", LOG_FILE);
-        exit(EXIT_FAILURE);
+        // Try to create the log files in the current directory instead
+        syslog(LOG_WARNING, "Failed to open log file %s, using local logs", LOG_FILE);
+        log_file = fopen("./company_daemon.log", "a");
+        if (log_file == NULL) {
+            syslog(LOG_ERR, "Failed to create local log file");
+            exit(EXIT_FAILURE);
+        }
     }
     
     change_log_file = fopen(CHANGE_LOG_FILE, "a");
     if (change_log_file == NULL) {
-        syslog(LOG_ERR, "Failed to open change log file: %s", CHANGE_LOG_FILE);
-        fclose(log_file);
-        exit(EXIT_FAILURE);
+        syslog(LOG_WARNING, "Failed to open change log file %s, using local logs", CHANGE_LOG_FILE);
+        change_log_file = fopen("./company_changes.log", "a");
+        if (change_log_file == NULL) {
+            syslog(LOG_ERR, "Failed to create local change log file");
+            fclose(log_file);
+            exit(EXIT_FAILURE);
+        }
     }
     
     // Log daemon start
-    log_message(LOG_INFO, "Daemon started");
+    log_message(DAEMON_LOG_INFO, "Daemon started");
 }
 
 void close_logging(void) {

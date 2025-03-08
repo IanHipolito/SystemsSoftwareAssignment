@@ -45,7 +45,11 @@ static bool write_pid_file(void) {
 static pid_t read_pid_file(void) {
     FILE *f = fopen(PID_FILE, "r");
     if (f == NULL) {
-        return 0;
+        // Try local file instead
+        f = fopen("./company_daemon.pid", "r");
+        if (f == NULL) {
+            return 0;
+        }
     }
     
     pid_t pid;
@@ -138,17 +142,17 @@ void handle_signal(int signum) {
     switch (signum) {
         case SIGTERM:
         case SIGINT:
-            log_message(LOG_INFO, "Received termination signal");
+            log_message(DAEMON_LOG_INFO, "Received termination signal");
             daemon_status = DAEMON_STOPPING;
             break;
         
         case SIGUSR1:
-            log_message(LOG_INFO, "Received signal to trigger manual operation");
+            log_message(DAEMON_LOG_INFO, "Received signal to trigger manual operation");
             manual_operation_triggered = true;
             break;
         
         default:
-            log_message(LOG_WARNING, "Received unsupported signal: %d", signum);
+            log_message(DAEMON_LOG_WARNING, "Received unsupported signal: %d", signum);
             break;
     }
 }
@@ -164,7 +168,7 @@ void setup_signal_handlers(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGUSR1, &sa, NULL);
     
-    log_message(LOG_INFO, "Signal handlers set up");
+    log_message(DAEMON_LOG_INFO, "Signal handlers set up");
 }
 
 // Monitor upload directory for changes
@@ -180,13 +184,13 @@ static void monitor_uploads(void) {
     last_check_time = now;
     
     // Check if all departments have uploaded their reports
-    log_message(LOG_INFO, "Checking for department uploads");
+    log_message(DAEMON_LOG_INFO, "Checking for department uploads");
     bool all_uploaded = check_department_uploads();
     
     if (!all_uploaded) {
-        log_message(LOG_WARNING, "Not all departments have uploaded their reports");
+        log_message(DAEMON_LOG_WARNING, "Not all departments have uploaded their reports");
     } else {
-        log_message(LOG_INFO, "All departments have uploaded their reports");
+        log_message(DAEMON_LOG_INFO, "All departments have uploaded their reports");
     }
     
     // Report task status
@@ -205,7 +209,7 @@ static bool is_time_for_transfer(void) {
 
 // Perform transfer and backup
 static void perform_transfer_and_backup(void) {
-    log_message(LOG_INFO, "Starting scheduled transfer and backup");
+    log_message(DAEMON_LOG_INFO, "Starting scheduled transfer and backup");
     
     // Perform transfer
     TaskStatus transfer_status = transfer_files();
@@ -215,7 +219,7 @@ static void perform_transfer_and_backup(void) {
         TaskStatus backup_status = backup_reporting_directory();
         
         if (backup_status == TASK_SUCCESS) {
-            log_message(LOG_INFO, "Scheduled transfer and backup completed successfully");
+            log_message(DAEMON_LOG_INFO, "Scheduled transfer and backup completed successfully");
         } else {
             log_message(DAEMON_LOG_ERROR, "Scheduled backup failed");
         }
@@ -227,7 +231,7 @@ static void perform_transfer_and_backup(void) {
 // Main daemon loop
 void daemon_loop(void) {
     daemon_status = DAEMON_RUNNING;
-    log_message(LOG_INFO, "Daemon loop started");
+    log_message(DAEMON_LOG_INFO, "Daemon loop started");
     
     // Schedule next transfer
     schedule_next_transfer();
@@ -254,7 +258,7 @@ void daemon_loop(void) {
         sleep(1);
     }
     
-    log_message(LOG_INFO, "Daemon loop stopped");
+    log_message(DAEMON_LOG_INFO, "Daemon loop stopped");
 }
 
 // Start the daemon
@@ -296,7 +300,7 @@ bool start_daemon(void) {
     setup_signal_handlers();
     
     daemon_status = DAEMON_STARTED;
-    log_message(LOG_INFO, "Daemon started successfully");
+    log_message(DAEMON_LOG_INFO, "Daemon started successfully");
     
     return true;
 }
@@ -311,7 +315,7 @@ bool stop_daemon(void) {
         return true;
     }
     
-    log_message(LOG_INFO, "Stopping daemon");
+    log_message(DAEMON_LOG_INFO, "Stopping daemon");
     
     // Clean up IPC
     cleanup_ipc();
@@ -358,7 +362,7 @@ bool trigger_manual_operation(void) {
         return false;
     }
     
-    log_message(LOG_INFO, "Manual operation triggered");
+    log_message(DAEMON_LOG_INFO, "Manual operation triggered");
     return true;
 }
 

@@ -1,11 +1,17 @@
 #include "../include/daemon.h"
 #include "../include/logging.h"
+#include "../include/config.h"
+#include "../include/ipc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <errno.h>
+
+// Since daemon_status is static in daemon.c, we'll instead use a different approach
+// by calling a function from daemon.h that properly sets the status
 
 void print_usage(const char* program_name) {
     printf("Usage: %s [options]\n", program_name);
@@ -14,6 +20,7 @@ void print_usage(const char* program_name) {
     printf("  stop       Stop the daemon\n");
     printf("  status     Check daemon status\n");
     printf("  trigger    Trigger manual backup and transfer\n");
+    printf("  debug      Run in foreground (debug mode)\n");
     printf("  help       Display this help message\n");
 }
 
@@ -32,12 +39,53 @@ int main(int argc, char *argv[]) {
         }
         
         printf("Starting daemon...\n");
+        
+        // Add debug output to stderr (will show even if stdout is redirected)
+        fprintf(stderr, "Checking directories...\n");
+        // Test directory access
+        if (access(UPLOAD_DIR, F_OK) == -1) {
+            fprintf(stderr, "Warning: Upload directory %s does not exist\n", UPLOAD_DIR);
+        }
+        if (access(REPORT_DIR, F_OK) == -1) {
+            fprintf(stderr, "Warning: Reporting directory %s does not exist\n", REPORT_DIR);
+        }
+        
         if (!start_daemon()) {
             printf("Failed to start daemon\n");
             return EXIT_FAILURE;
         }
         
         // Main daemon loop - only reached in child process
+        daemon_loop();
+        stop_daemon();
+        
+    } else if (strcmp(argv[1], "debug") == 0) {
+        printf("Running in debug mode (foreground)...\n");
+        
+        // Initialize without daemonizing
+        init_logging();
+        load_config();
+        
+        // Check if directories exist after loading config
+        if (access(UPLOAD_DIR, F_OK) == -1) {
+            fprintf(stderr, "Upload directory %s still does not exist after load_config\n", UPLOAD_DIR);
+        } else {
+            fprintf(stderr, "Upload directory %s exists\n", UPLOAD_DIR);
+        }
+        
+        if (!init_ipc()) {
+            printf("Failed to initialize IPC\n");
+            close_logging();
+            return EXIT_FAILURE;
+        }
+        
+        // Set up signal handlers
+        setup_signal_handlers();
+        
+        // Run main loop directly
+        printf("Entering main loop...\n");
+        
+        // Main loop (this function manages daemon_status internally)
         daemon_loop();
         stop_daemon();
         
@@ -52,7 +100,7 @@ int main(int argc, char *argv[]) {
         if (pid > 0) {
             // Send SIGTERM to the daemon
             if (kill(pid, SIGTERM) == -1) {
-                perror("Failed to terminate daemon");
+                printf("Failed to terminate daemon: %s\n", strerror(errno));
                 return EXIT_FAILURE;
             }
             printf("Daemon stopped\n");

@@ -30,7 +30,7 @@ static void ensure_directory_exists(const char* path) {
 
 // Load configuration and ensure required directories exist
 void load_config(void) {
-    // Create main directories
+    // Create main directories with more explicit error handling
     ensure_directory_exists(UPLOAD_DIR);
     ensure_directory_exists(REPORT_DIR);
     ensure_directory_exists(BACKUP_DIR);
@@ -40,4 +40,11 @@ void load_config(void) {
     ensure_directory_exists(MANUFACTURING_DIR);
     ensure_directory_exists(SALES_DIR);
     ensure_directory_exists(DISTRIBUTION_DIR);
+    
+    // Set permissions for upload directories
+    chmod(UPLOAD_DIR, 0777);  // Allow everyone to write to upload directory
+    chmod(WAREHOUSE_DIR, 0777);
+    chmod(MANUFACTURING_DIR, 0777);
+    chmod(SALES_DIR, 0777);
+    chmod(DISTRIBUTION_DIR, 0777);
 }
