@@ -19,6 +19,11 @@
 #include <errno.h>
 #include <syslog.h>
 #include <features.h>
+#include <sys/file.h>
+#include <fcntl.h>
+
+#pragma unused(daemon_pid)
+#pragma unused(process_exists)
 
 // Global variables
 static DaemonStatus daemon_status = DAEMON_STOPPED;
@@ -84,9 +89,30 @@ static pid_t read_pid_file(void) {
 }
 
 // Remove PID file
-static void remove_pid_file(void) {
-    unlink(PID_FILE);
+bool remove_pid_file(void) {
+    const char* pid_paths[] = {
+        PID_FILE,
+        "./company_daemon.pid", 
+        "/var/run/company_daemon.pid",
+        "/run/company_daemon.pid"
+    };
+    
+    bool file_removed = false;
+    
+    for (size_t i = 0; i < sizeof(pid_paths) / sizeof(pid_paths[0]); i++) {
+        if (unlink(pid_paths[i]) == 0) {
+            log_message(DAEMON_LOG_INFO, "Removed PID file: %s", pid_paths[i]);
+            file_removed = true;
+        } else if (errno != ENOENT) {
+            // Log error if it's not just "file not found"
+            log_message(DAEMON_LOG_WARNING, "Failed to remove PID file %s: %s", 
+                        pid_paths[i], strerror(errno));
+        }
+    }
+    
+    return file_removed;
 }
+
 
 // Check if process with given PID exists
 static bool process_exists(pid_t pid) {
@@ -283,20 +309,79 @@ void daemon_loop(void) {
     log_message(DAEMON_LOG_INFO, "Daemon loop stopped");
 }
 
+// Cleanup function to remove stale daemon processes
+static void cleanup_stale_processes(void) {
+    // Read the PID file to check for an existing process
+    pid_t existing_pid = read_pid_file();
+    
+    if (existing_pid > 0) {
+        // Check if the process is still running
+        if (kill(existing_pid, 0) == -1 && errno == ESRCH) {
+            // Process no longer exists, remove PID file
+            log_message(DAEMON_LOG_WARNING, 
+                "Removing stale PID file for non-existent process %d", 
+                existing_pid);
+            remove_pid_file();
+        } else {
+            // Try to terminate the existing process
+            log_message(DAEMON_LOG_WARNING, 
+                "Attempting to terminate existing daemon process %d", 
+                existing_pid);
+            kill(existing_pid, SIGTERM);
+            
+            // Give it a moment to terminate
+            usleep(500000);  // 0.5 seconds
+            
+            // Force kill if it didn't terminate
+            if (kill(existing_pid, 0) == 0) {
+                kill(existing_pid, SIGKILL);
+            }
+        }
+    }
+
+    // Additional cleanup: remove any stale lock files
+    unlink("/var/run/company_daemon.lock");
+}
+
 // Start the daemon
 bool start_daemon(void) {
+
+    cleanup_stale_processes();
+
     // Check if already running
     if (is_daemon_running()) {
         log_message(DAEMON_LOG_ERROR, "Daemon is already running");
         return false;
     }
     
-    // Daemonize process
-    if (!daemonize()) {
-        log_message(DAEMON_LOG_ERROR, "Failed to daemonize process");
+    // Ensure only one instance can run
+    int lock_fd = open("/var/run/company_daemon.lock", O_CREAT | O_RDWR, 0666);
+    if (lock_fd == -1) {
+        log_message(DAEMON_LOG_ERROR, "Failed to create lock file: %s", strerror(errno));
         return false;
     }
     
+    // Try to acquire an exclusive lock
+    if (flock(lock_fd, LOCK_EX | LOCK_NB) == -1) {
+        log_message(DAEMON_LOG_ERROR, "Failed to acquire lock: %s", strerror(errno));
+        close(lock_fd);
+        return false;
+    }
+    
+    // Daemonize process
+    if (!daemonize()) {
+        log_message(DAEMON_LOG_ERROR, "Failed to daemonize process");
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+        return false;
+    }
+    
+    // Store the lock file descriptor as a global or static variable
+    // to keep the lock held throughout the daemon's lifetime
+    static int daemon_lock_fd = -1;
+    daemon_lock_fd = lock_fd;
+
+    // Continue with existing start_daemon logic
     // Initialize logging
     init_logging();
     
@@ -307,6 +392,8 @@ bool start_daemon(void) {
     if (!write_pid_file()) {
         log_message(DAEMON_LOG_ERROR, "Failed to write PID file");
         close_logging();
+        flock(daemon_lock_fd, LOCK_UN);
+        close(daemon_lock_fd);
         return false;
     }
     
@@ -315,6 +402,8 @@ bool start_daemon(void) {
         log_message(DAEMON_LOG_ERROR, "Failed to initialize IPC");
         remove_pid_file();
         close_logging();
+        flock(daemon_lock_fd, LOCK_UN);
+        close(daemon_lock_fd);
         return false;
     }
     
@@ -339,31 +428,63 @@ bool stop_daemon(void) {
     
     log_message(DAEMON_LOG_INFO, "Stopping daemon");
     
-    // Clean up IPC
+    // Attempt IPC cleanup with error handling
+    bool ipc_cleanup_success = true;
+    bool pid_removal_success = true;
+    bool logging_cleanup_success = true;
+    
+    // Cleanup IPC resources using the function from ipc.c
     cleanup_ipc();
     
-    // Remove PID file
-    remove_pid_file();
+    // Try to remove PID file
+    if (!remove_pid_file()) {
+        log_message(DAEMON_LOG_WARNING, "Could not remove PID file");
+        pid_removal_success = false;
+    }
     
     // Close logging
     close_logging();
     
+    // Additional cleanup of potential lock or temporary files
+    if (unlink("/var/run/company_daemon.lock") == -1 && errno != ENOENT) {
+        log_message(DAEMON_LOG_WARNING, "Failed to remove lock file: %s", strerror(errno));
+    }
+    
+    if (unlink("/tmp/company_daemon.lock") == -1 && errno != ENOENT) {
+        log_message(DAEMON_LOG_WARNING, "Failed to remove temp lock file: %s", strerror(errno));
+    }
+    
     daemon_status = DAEMON_STOPPED;
-    return true;
+    
+    // Return success only if all cleanup steps were successful
+    return (ipc_cleanup_success && pid_removal_success && logging_cleanup_success);
 }
 
 // Check if the daemon is already running
 bool is_daemon_running(void) {
     pid_t pid = read_pid_file();
     
-    if (pid > 0 && process_exists(pid)) {
-        daemon_pid = pid;
+    if (pid <= 0) {
+        return false;
+    }
+    
+    // Check process status using kill with signal 0
+    if (kill(pid, 0) == 0) {
+        // Process exists and we have permission to send signals
         return true;
     }
     
-    // PID file exists but process doesn't; clean up
-    if (pid > 0) {
+    // Process doesn't exist or we can't send signals
+    if (errno == ESRCH) {
+        // Process does not exist
         remove_pid_file();
+        return false;
+    }
+    
+    // Permission denied or other error
+    if (errno == EPERM) {
+        log_message(DAEMON_LOG_WARNING, "PID exists but process not accessible");
+        return true;
     }
     
     return false;
