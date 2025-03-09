@@ -22,8 +22,11 @@
 #include <sys/file.h>
 #include <fcntl.h>
 
-#pragma unused(daemon_pid)
-#pragma unused(process_exists)
+// Remove or comment out these variables if they're not used
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#endif
 
 // Global variables
 static DaemonStatus daemon_status = DAEMON_STOPPED;
@@ -329,8 +332,7 @@ static void cleanup_stale_processes(void) {
                 existing_pid);
             kill(existing_pid, SIGTERM);
             
-            // Give it a moment to terminate
-            usleep(500000);  // 0.5 seconds
+            sleep(1);
             
             // Force kill if it didn't terminate
             if (kill(existing_pid, 0) == 0) {

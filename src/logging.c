@@ -15,12 +15,41 @@
 #include <sys/types.h>
 #include <fcntl.h>
 
+// Define PATH_MAX if not already defined
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #define MAX_LOG_LINE 1024
+#define LOG_FILENAME "company_daemon.log"
+#define CHANGE_LOG_FILENAME "company_changes.log"
 
 static FILE *log_file = NULL;
 static FILE *change_log_file = NULL;
 
-// In init_logging() function
+// Utility function to safely create log file path
+static void create_log_path(char *dest, size_t dest_size, const char *dir, const char *filename) {
+    // Ensure we have enough space for dir, '/', filename, and null terminator
+    size_t dir_len = dir ? strlen(dir) : 0;
+    size_t filename_len = strlen(filename);
+    
+    if (dir_len + filename_len + 2 > dest_size) {
+        // If path would be too long, just use filename
+        strncpy(dest, filename, dest_size);
+        dest[dest_size - 1] = '\0';
+        syslog(LOG_WARNING, "Log path too long, using fallback: %s", dest);
+        return;
+    }
+    
+    // Construct path safely
+    if (dir && dir[0] != '\0') {
+        snprintf(dest, dest_size, "%s/%s", dir, filename);
+    } else {
+        strncpy(dest, filename, dest_size);
+        dest[dest_size - 1] = '\0';
+    }
+}
+
 void init_logging(void) {
     // Open system log
     openlog("company_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);
@@ -34,9 +63,11 @@ void init_logging(void) {
            pw ? pw->pw_name : "unknown", uid);
 
     // Print current working directory
-    char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        syslog(LOG_INFO, "Current working directory: %s", cwd);
+    char cwd[PATH_MAX];
+    cwd[0] = '\0';
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        syslog(LOG_WARNING, "Failed to get current working directory");
+        strcpy(cwd, ".");
     }
 
     // Attempt to open/create log files with extensive error checking
@@ -55,8 +86,10 @@ void init_logging(void) {
         }
 
         // Try alternative log file location
-        char local_log_path[1024];
-        snprintf(local_log_path, sizeof(local_log_path), "%s/company_daemon.log", cwd);
+        char local_log_path[PATH_MAX];
+        create_log_path(local_log_path, sizeof(local_log_path), 
+                        cwd[0] ? cwd : ".", LOG_FILENAME);
+
         log_fd = open(local_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
         
         if (log_fd == -1) {
@@ -87,8 +120,10 @@ void init_logging(void) {
                CHANGE_LOG_FILE, strerror(errno));
         
         // Try local change log
-        char local_change_log_path[1024];
-        snprintf(local_change_log_path, sizeof(local_change_log_path), "%s/company_changes.log", cwd);
+        char local_change_log_path[PATH_MAX];
+        create_log_path(local_change_log_path, sizeof(local_change_log_path), 
+                        cwd[0] ? cwd : ".", CHANGE_LOG_FILENAME);
+
         change_log_fd = open(local_change_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
         
         if (change_log_fd == -1) {
