@@ -1,79 +1,120 @@
-#include "../include/utils.h"
-#include "../include/config.h"
-#include <stdio.h>
-#include <stdlib.h>
+/**
+ * @file utils.c
+ * @brief Implementation of logging and utility functions
+ */
+
+#include "utils.h"
+#include <stdarg.h>
 #include <string.h>
-#include <time.h>
-#include <sys/stat.h>
-#include <pwd.h>
-#include <unistd.h>
+#include <errno.h>
+#include <syslog.h>
 
-void get_current_date(char* date_str, size_t size) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    strftime(date_str, size, "%Y-%m-%d", t);
-}
-
-time_t get_current_time(void) {
-    return time(NULL);
-}
-
-bool is_transfer_time(void) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
+/**
+ * Log an error message
+ * @param format Format string for the message
+ * @param ... Variable arguments
+ */
+void log_error(const char* format, ...) {
+    FILE *log_fp;
+    va_list args;
+    time_t now;
+    char time_str[MAX_TIME_LENGTH];
     
-    return (t->tm_hour == TRANSFER_HOUR && 
-            t->tm_min == TRANSFER_MINUTE && 
-            t->tm_sec == TRANSFER_SECOND);
-}
-
-void format_time(time_t time_val, char* time_str, size_t size) {
-    struct tm *t = localtime(&time_val);
-    strftime(time_str, size, "%Y-%m-%d %H:%M:%S", t);
-}
-
-void get_file_owner(const char* path, char* owner, size_t size) {
-    struct stat file_stat;
-    struct passwd *pwd;
+    /* Get current time */
+    now = time(NULL);
+    get_timestamp_string(now, time_str, MAX_TIME_LENGTH);
     
-    if (stat(path, &file_stat) == 0) {
-        pwd = getpwuid(file_stat.st_uid);
-        if (pwd != NULL) {
-            strncpy(owner, pwd->pw_name, size);
-            owner[size - 1] = '\0';
-        } else {
-            snprintf(owner, size, "%d", file_stat.st_uid);
-        }
-    } else {
-        strncpy(owner, "unknown", size);
-    }
-}
-
-int time_until_next_execution(int hour, int minute, int second) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    struct tm next = *t;
-    
-    next.tm_hour = hour;
-    next.tm_min = minute;
-    next.tm_sec = second;
-    
-    // If the specified time has already passed for today, schedule for tomorrow
-    if (now >= mktime(&next)) {
-        next.tm_mday += 1;
+    /* Open the error log file for appending */
+    log_fp = fopen(ERROR_LOG, "a");
+    if (log_fp == NULL) {
+        /* Fall back to syslog if file can't be opened */
+        va_start(args, format);
+        vsyslog(LOG_ERR, format, args);
+        va_end(args);
+        return;
     }
     
-    return difftime(mktime(&next), now);
-}
-
-bool is_xml_file(const char* filename) {
-    const char *ext = strrchr(filename, '.');
-    if (ext != NULL) {
-        return (strcmp(ext, ".xml") == 0);
+    /* Write timestamp and error prefix */
+    fprintf(log_fp, "[%s] ERROR: ", time_str);
+    
+    /* Write the formatted message */
+    va_start(args, format);
+    vfprintf(log_fp, format, args);
+    va_end(args);
+    
+    /* Add newline if not present */
+    if (format[strlen(format) - 1] != '\n') {
+        fprintf(log_fp, "\n");
     }
-    return false;
+    
+    /* Close the log file */
+    fclose(log_fp);
+    
+    /* Also log to syslog */
+    va_start(args, format);
+    vsyslog(LOG_ERR, format, args);
+    va_end(args);
 }
 
-bool is_department_file(const char* filename, const char* department) {
-    return (strncmp(filename, department, strlen(department)) == 0);
+/**
+ * Log an operation message
+ * @param format Format string for the message
+ * @param ... Variable arguments
+ */
+void log_operation(const char* format, ...) {
+    FILE *log_fp;
+    va_list args;
+    time_t now;
+    char time_str[MAX_TIME_LENGTH];
+    
+    /* Get current time */
+    now = time(NULL);
+    get_timestamp_string(now, time_str, MAX_TIME_LENGTH);
+    
+    /* Open the operation log file for appending */
+    log_fp = fopen(OPERATION_LOG, "a");
+    if (log_fp == NULL) {
+        /* Fall back to syslog if file can't be opened */
+        va_start(args, format);
+        vsyslog(LOG_INFO, format, args);
+        va_end(args);
+        return;
+    }
+    
+    /* Write timestamp and info prefix */
+    fprintf(log_fp, "[%s] INFO: ", time_str);
+    
+    /* Write the formatted message */
+    va_start(args, format);
+    vfprintf(log_fp, format, args);
+    va_end(args);
+    
+    /* Add newline if not present */
+    if (format[strlen(format) - 1] != '\n') {
+        fprintf(log_fp, "\n");
+    }
+    
+    /* Close the log file */
+    fclose(log_fp);
+    
+    /* Also log to syslog */
+    va_start(args, format);
+    vsyslog(LOG_INFO, format, args);
+    va_end(args);
+}
+
+/**
+ * Get a formatted timestamp string
+ * @param timestamp Timestamp to format
+ * @param buffer Buffer to store the formatted timestamp
+ * @param buffer_size Size of the buffer
+ * @return Pointer to the buffer
+ */
+char* get_timestamp_string(time_t timestamp, char* buffer, size_t buffer_size) {
+    struct tm *tm_info;
+    
+    tm_info = localtime(&timestamp);
+    strftime(buffer, buffer_size, "%Y-%m-%d %H:%M:%S", tm_info);
+    
+    return buffer;
 }

@@ -1,363 +1,320 @@
+/**
+ * @file daemon.c
+ * @brief Daemon initialization and main control functions
+ */
 #define _POSIX_C_SOURCE 200809L
-#include "../include/daemon.h"
-#include "../include/config.h"
-#include "../include/logging.h"
-#include "../include/file_transfer.h"
-#include "../include/backup.h"
-#include "../include/lock_manager.h"
-#include "../include/utils.h"
-#include "../include/ipc.h"
+#include "daemon.h"
+#include "report_system.h"
+#include "utils.h"
+#include "backup.h"
+#include "file_operations.h"
+#include "ipc.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <unistd.h>
-#include <signal.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <string.h>
-#include <time.h>
-#include <errno.h>
-#include <syslog.h>
+#include <signal.h>
 
-// Global variables
-static DaemonStatus daemon_status = DAEMON_STOPPED;
-static pid_t daemon_pid = 0;
-static bool manual_operation_triggered = false;
+/* Global variables */
+static volatile sig_atomic_t daemon_exit = 0;
+static volatile sig_atomic_t force_backup = 0;
+static volatile sig_atomic_t force_transfer = 0;
 
-// PID file path
-#define PID_FILE "/var/run/company_daemon.pid"
-
-// Write PID file
-static bool write_pid_file(void) {
-    FILE *f = fopen(PID_FILE, "w");
-    if (f == NULL) {
-        log_message(LOG_ERROR, "Failed to create PID file: %s", strerror(errno));
-        return false;
-    }
-    
-    fprintf(f, "%d\n", getpid());
-    fclose(f);
-    return true;
-}
-
-// Read PID from file
-static pid_t read_pid_file(void) {
-    FILE *f = fopen(PID_FILE, "r");
-    if (f == NULL) {
-        return 0;
-    }
-    
-    pid_t pid;
-    if (fscanf(f, "%d", &pid) != 1) {
-        pid = 0;
-    }
-    
-    fclose(f);
-    return pid;
-}
-
-// Remove PID file
-static void remove_pid_file(void) {
-    unlink(PID_FILE);
-}
-
-// Check if process with given PID exists
-static bool process_exists(pid_t pid) {
-    if (pid <= 0) {
-        return false;
-    }
-    
-    if (kill(pid, 0) == 0) {
-        return true;
-    }
-    
-    return (errno != ESRCH);
-}
-
-// Daemonize process
-static bool daemonize(void) {
-    pid_t pid;
-    
-    // Fork off the parent process
-    pid = fork();
-    if (pid < 0) {
-        log_message(LOG_ERROR, "Failed to fork first time: %s", strerror(errno));
-        return false;
-    }
-    
-    // If we got a good PID, then we can exit the parent process
-    if (pid > 0) {
-        exit(EXIT_SUCCESS);
-    }
-    
-    // Create a new session and become the session leader
-    if (setsid() < 0) {
-        log_message(LOG_ERROR, "Failed to create a new session: %s", strerror(errno));
-        return false;
-    }
-    
-    // Ignore certain signals
-    signal(SIGCHLD, SIG_IGN);
-    signal(SIGHUP, SIG_IGN);
-    
-    // Fork again to ensure we are not a session leader
-    pid = fork();
-    if (pid < 0) {
-        log_message(LOG_ERROR, "Failed to fork second time: %s", strerror(errno));
-        return false;
-    }
-    
-    // If we got a good PID, then we can exit the parent process
-    if (pid > 0) {
-        exit(EXIT_SUCCESS);
-    }
-    
-    // Change the file mode mask
-    umask(0);
-    
-    // Change the current working directory
-    if (chdir("/") < 0) {
-        log_message(LOG_ERROR, "Failed to change working directory: %s", strerror(errno));
-        return false;
-    }
-    
-    // Close all open file descriptors
-    for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--) {
-        close(x);
-    }
-    
-    // Open the log file
-    openlog("company_daemon", LOG_PID, LOG_DAEMON);
-    
-    return true;
-}
-
-// Signal handler
-void handle_signal(int signum) {
-    switch (signum) {
+/**
+ * Signal handler for the daemon
+ * @param sig Signal number
+ */
+void signal_handler(int sig) {
+    switch (sig) {
         case SIGTERM:
         case SIGINT:
-            log_message(LOG_INFO, "Received termination signal");
-            daemon_status = DAEMON_STOPPING;
+            daemon_exit = 1;
             break;
-        
         case SIGUSR1:
-            log_message(LOG_INFO, "Received signal to trigger manual operation");
-            manual_operation_triggered = true;
+            force_backup = 1;
             break;
-        
-        default:
-            log_message(LOG_WARNING, "Received unsupported signal: %d", signum);
+        case SIGUSR2:
+            force_transfer = 1;
+            break;
+        case SIGHUP:
+            /* Could be used to reload configuration */
             break;
     }
 }
 
-// Set up signal handlers
+/**
+ * Setup all signal handlers for the daemon
+ */
 void setup_signal_handlers(void) {
     struct sigaction sa;
     
-    // Set up signal handlers
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = handle_signal;
+    /* Setup the signal handler structure */
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    
+    /* Register signal handlers */
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
     
-    log_message(LOG_INFO, "Signal handlers set up");
+    /* Ignore these signals */
+    signal(SIGCHLD, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);
 }
 
-// Monitor upload directory for changes
-static void monitor_uploads(void) {
-    static time_t last_check_time = 0;
+/**
+ * Create the PID file for the daemon
+ * @return SUCCESS on success, FAILURE on error
+ */
+int create_pid_file(void) {
+    FILE *pid_fp;
     
-    // Check every minute
-    time_t now = time(NULL);
-    if (now - last_check_time < 60) {
-        return;
+    pid_fp = fopen(PID_FILE, "w");
+    if (pid_fp == NULL) {
+        log_error("Cannot create PID file: %s", strerror(errno));
+        return FAILURE;
     }
     
-    last_check_time = now;
+    fprintf(pid_fp, "%d\n", getpid());
+    fclose(pid_fp);
     
-    // Check if all departments have uploaded their reports
-    log_message(LOG_INFO, "Checking for department uploads");
-    bool all_uploaded = check_department_uploads();
+    return SUCCESS;
+}
+
+/**
+ * Check if another instance of the daemon is already running
+ * @return TRUE if another instance is running, FALSE otherwise
+ */
+int check_singleton(void) {
+    FILE *pid_fp;
+    pid_t pid;
+    int result = FALSE;
     
-    if (!all_uploaded) {
-        log_message(LOG_WARNING, "Not all departments have uploaded their reports");
-    } else {
-        log_message(LOG_INFO, "All departments have uploaded their reports");
+    /* Try to open the PID file */
+    pid_fp = fopen(PID_FILE, "r");
+    if (pid_fp == NULL) {
+        /* PID file doesn't exist, so no other instance is running */
+        return FALSE;
     }
     
-    // Report task status
-    report_task_status(TASK_FILE_CHECK, all_uploaded ? TASK_SUCCESS : TASK_FAILURE);
-}
-
-// Check if it's time for scheduled transfer
-static bool is_time_for_transfer(void) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    
-    return (t->tm_hour == TRANSFER_HOUR && 
-            t->tm_min == TRANSFER_MINUTE && 
-            t->tm_sec == TRANSFER_SECOND);
-}
-
-// Perform transfer and backup
-static void perform_transfer_and_backup(void) {
-    log_message(LOG_INFO, "Starting scheduled transfer and backup");
-    
-    // Perform transfer
-    TaskStatus transfer_status = transfer_files();
-    
-    // If transfer successful, perform backup
-    if (transfer_status == TASK_SUCCESS) {
-        TaskStatus backup_status = backup_reporting_directory();
-        
-        if (backup_status == TASK_SUCCESS) {
-            log_message(LOG_INFO, "Scheduled transfer and backup completed successfully");
-        } else {
-            log_message(LOG_ERROR, "Scheduled backup failed");
+    /* Read the PID from the file */
+    if (fscanf(pid_fp, "%d", &pid) == 1) {
+        /* Check if a process with this PID exists */
+        if (kill(pid, 0) == 0) {
+            /* Process exists, another instance is running */
+            result = TRUE;
         }
-    } else {
-        log_message(LOG_ERROR, "Scheduled transfer failed");
     }
+    
+    fclose(pid_fp);
+    return result;
 }
 
-// Main daemon loop
-void daemon_loop(void) {
-    daemon_status = DAEMON_RUNNING;
-    log_message(LOG_INFO, "Daemon loop started");
+/**
+ * Initialize the daemon process
+ * @return SUCCESS on success, FAILURE on error
+ */
+int daemon_init(void) {
+    pid_t pid, sid;
     
-    // Schedule next transfer
-    schedule_next_transfer();
+    /* Check if another instance is already running */
+    if (check_singleton()) {
+        fprintf(stderr, "Another instance of the daemon is already running.\n");
+        return FAILURE;
+    }
     
-    // Loop until signaled to stop
-    while (daemon_status == DAEMON_RUNNING) {
-        // Check for manual operation trigger
-        if (manual_operation_triggered) {
-            perform_transfer_and_backup();
-            manual_operation_triggered = false;
+    /* Fork the parent process */
+    pid = fork();
+    
+    /* Check for fork() error */
+    if (pid < 0) {
+        perror("Error forking daemon process");
+        return FAILURE;
+    }
+    
+    /* Exit the parent process if fork was successful */
+    if (pid > 0) {
+        exit(EXIT_SUCCESS);
+    }
+    
+    /* Change file mode mask */
+    umask(0);
+    
+    /* Create a new session ID for the child process */
+    sid = setsid();
+    if (sid < 0) {
+        perror("Error creating session for daemon");
+        return FAILURE;
+    }
+    
+    /* Change the current working directory to root */
+    if (chdir("/") < 0) {
+        perror("Error changing directory for daemon");
+        return FAILURE;
+    }
+    
+    /* Close standard file descriptors */
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+    
+    /* Redirect standard file descriptors to /dev/null */
+    open("/dev/null", O_RDONLY);  /* stdin */
+    open("/dev/null", O_WRONLY);  /* stdout */
+    open("/dev/null", O_WRONLY);  /* stderr */
+    
+    /* Create PID file */
+    if (create_pid_file() != SUCCESS) {
+        return FAILURE;
+    }
+    
+    /* Setup signal handlers */
+    setup_signal_handlers();
+    
+    /* Setup logging */
+    openlog("report_daemon", LOG_PID, LOG_DAEMON);
+    syslog(LOG_INFO, "Report daemon started");
+    
+    /* Create necessary directories if they don't exist */
+    create_directory_if_not_exists(UPLOAD_DIR);
+    create_directory_if_not_exists(DASHBOARD_DIR);
+    create_directory_if_not_exists(BACKUP_DIR);
+    create_directory_if_not_exists(LOG_DIR);
+    
+    /* Setup IPC */
+    if (setup_ipc() != SUCCESS) {
+        log_error("Failed to setup IPC");
+        return FAILURE;
+    }
+    
+    /* Set initial directory permissions */
+    set_directory_permissions(UPLOAD_DIR, UPLOAD_PERMISSIONS);
+    set_directory_permissions(DASHBOARD_DIR, DASHBOARD_PERMISSIONS);
+    
+    log_operation("Daemon initialization complete");
+    return SUCCESS;
+}
+
+/**
+ * Cleanup daemon resources before exit
+ */
+void daemon_cleanup(void) {
+    /* Remove PID file */
+    unlink(PID_FILE);
+    
+    /* Cleanup IPC */
+    cleanup_ipc();
+    
+    /* Close system log */
+    closelog();
+    
+    log_operation("Daemon shutdown complete");
+}
+
+/**
+ * Main daemon loop
+ */
+void daemon_main_loop(void) {
+    time_t now, last_check = 0;
+    struct tm *tm_now;
+    
+    log_operation("Entering main daemon loop");
+    
+    while (!daemon_exit) {
+        /* Get current time */
+        now = time(NULL);
+        tm_now = localtime(&now);
+        
+        /* Check if it's time to transfer files (1:00 AM) */
+        if ((tm_now->tm_hour == TRANSFER_HOUR && 
+             tm_now->tm_min == TRANSFER_MINUTE) || force_transfer) {
+            
+            log_operation("Starting scheduled file transfer and backup");
+            
+            /* Lock directories before operations */
+            lock_directories();
+            
+            /* Transfer reports from upload to dashboard */
+            if (transfer_reports() == SUCCESS) {
+                log_operation("File transfer completed successfully");
+            } else {
+                log_error("File transfer failed");
+            }
+            
+            /* Check for missing department reports */
+            check_missing_reports();
+            
+            /* Backup the dashboard directory */
+            if (backup_dashboard() == SUCCESS) {
+                log_operation("Backup completed successfully");
+            } else {
+                log_error("Backup failed");
+            }
+            
+            /* Unlock directories after operations */
+            unlock_directories();
+            
+            /* Reset forced transfer flag */
+            force_transfer = 0;
         }
         
-        // Check if it's time for scheduled transfer
-        if (is_time_for_transfer()) {
-            perform_transfer_and_backup();
-            // Schedule next transfer
-            schedule_next_transfer();
+        /* Check for directory changes every 5 seconds */
+        if (now - last_check >= 5 || force_backup) {
+            monitor_directory_changes();
+            last_check = now;
+            
+            /* If force_backup is set, perform a backup */
+            if (force_backup) {
+                log_operation("Starting manual backup");
+                
+                /* Lock directories */
+                lock_directories();
+                
+                /* Backup the dashboard directory */
+                if (backup_dashboard() == SUCCESS) {
+                    log_operation("Manual backup completed successfully");
+                } else {
+                    log_error("Manual backup failed");
+                }
+                
+                /* Unlock directories */
+                unlock_directories();
+                
+                /* Reset forced backup flag */
+                force_backup = 0;
+            }
         }
         
-        // Monitor upload directory
-        monitor_uploads();
-        
-        // Sleep for 1 second
+        /* Sleep for 1 second before next iteration */
         sleep(1);
     }
     
-    log_message(LOG_INFO, "Daemon loop stopped");
+    log_operation("Exiting main daemon loop");
 }
 
-// Start the daemon
-bool start_daemon(void) {
-    // Check if already running
-    if (is_daemon_running()) {
-        log_message(LOG_ERROR, "Daemon is already running");
-        return false;
+/**
+ * Main entry point for the daemon
+ */
+int main(int argc, char *argv[]) {
+    /* Initialize the daemon */
+    if (daemon_init() != SUCCESS) {
+        return EXIT_FAILURE;
     }
     
-    // Daemonize process
-    if (!daemonize()) {
-        log_message(LOG_ERROR, "Failed to daemonize process");
-        return false;
-    }
+    /* Run the main daemon loop */
+    daemon_main_loop();
     
-    // Initialize logging
-    init_logging();
+    /* Cleanup before exit */
+    daemon_cleanup();
     
-    // Load configuration
-    load_config();
-    
-    // Write PID file
-    if (!write_pid_file()) {
-        log_message(LOG_ERROR, "Failed to write PID file");
-        close_logging();
-        return false;
-    }
-    
-    // Initialize IPC
-    if (!init_ipc()) {
-        log_message(LOG_ERROR, "Failed to initialize IPC");
-        remove_pid_file();
-        close_logging();
-        return false;
-    }
-    
-    // Set up signal handlers
-    setup_signal_handlers();
-    
-    daemon_status = DAEMON_STARTED;
-    log_message(LOG_INFO, "Daemon started successfully");
-    
-    return true;
-}
-
-// Stop the daemon
-bool stop_daemon(void) {
-    if (daemon_status == DAEMON_STOPPED) {
-        return true;
-    }
-    
-    log_message(LOG_INFO, "Stopping daemon");
-    
-    // Clean up IPC
-    cleanup_ipc();
-    
-    // Remove PID file
-    remove_pid_file();
-    
-    // Close logging
-    close_logging();
-    
-    daemon_status = DAEMON_STOPPED;
-    return true;
-}
-
-// Check if the daemon is already running
-bool is_daemon_running(void) {
-    pid_t pid = read_pid_file();
-    
-    if (pid > 0 && process_exists(pid)) {
-        daemon_pid = pid;
-        return true;
-    }
-    
-    // PID file exists but process doesn't; clean up
-    if (pid > 0) {
-        remove_pid_file();
-    }
-    
-    return false;
-}
-
-// Trigger manual operation
-bool trigger_manual_operation(void) {
-    pid_t pid = read_pid_file();
-    
-    if (pid <= 0) {
-        log_message(LOG_ERROR, "Daemon is not running");
-        return false;
-    }
-    
-    // Send SIGUSR1 to trigger manual operation
-    if (kill(pid, SIGUSR1) == -1) {
-        log_message(LOG_ERROR, "Failed to send signal to daemon: %s", strerror(errno));
-        return false;
-    }
-    
-    log_message(LOG_INFO, "Manual operation triggered");
-    return true;
-}
-
-// Get current daemon status
-DaemonStatus get_daemon_status(void) {
-    return daemon_status;
+    return EXIT_SUCCESS;
 }

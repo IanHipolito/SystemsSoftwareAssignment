@@ -1,31 +1,45 @@
+/**
+ * @file utils.h
+ * @brief Header file for logging and utility functions
+ */
+
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
-#include <stdbool.h>
+#include <syslog.h>
+#include <errno.h>
 
-// Get current date/time as string in format YYYY-MM-DD
-void get_current_date(char* date_str, size_t size);
+/* Predefined constants from the original header */
+#define MAX_TIME_LENGTH 64
+#define ERROR_LOG      "/var/report_system/logs/error.log"
+#define OPERATION_LOG  "/var/report_system/logs/operations.log"
+#define CHANGE_LOG     "/var/report_system/logs/changes.log"
 
-// Get current time in seconds since Epoch
-time_t get_current_time(void);
+/**
+ * Log an error message
+ * @param format Format string for the message
+ * @param ... Variable arguments
+ */
+void log_error(const char* format, ...);
 
-// Check if the time matches the scheduled transfer time
-bool is_transfer_time(void);
+/**
+ * Log an operation message
+ * @param format Format string for the message
+ * @param ... Variable arguments
+ */
+void log_operation(const char* format, ...);
 
-// Convert time_t to formatted string
-void format_time(time_t time_val, char* time_str, size_t size);
-
-// Get username of the user who modified a file
-void get_file_owner(const char* path, char* owner, size_t size);
-
-// Calculate time until next execution of scheduled task
-int time_until_next_execution(int hour, int minute, int second);
-
-// Check if a file is XML
-bool is_xml_file(const char* filename);
-
-// Check if a file belongs to a department
-bool is_department_file(const char* filename, const char* department);
+/**
+ * Get a formatted timestamp string
+ * @param timestamp Timestamp to format
+ * @param buffer Buffer to store the formatted timestamp
+ * @param buffer_size Size of the buffer
+ * @return Pointer to the buffer
+ */
+char* get_timestamp_string(time_t timestamp, char* buffer, size_t buffer_size);
 
 #endif /* UTILS_H */

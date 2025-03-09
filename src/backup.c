@@ -1,168 +1,213 @@
-#include "../include/backup.h"
-#include "../include/config.h"
-#include "../include/logging.h"
-#include "../include/lock_manager.h"
-#include "../include/utils.h"
-#include <stdio.h>
-#include <stdlib.h>
+/**
+ * @file backup.c
+ * @brief Implementation of backup and directory management functions
+ */
+
+#define _DEFAULT_SOURCE  // For DT_DIR on some systems
+#define _POSIX_C_SOURCE 200809L
+
+#include "backup.h"
+#include "utils.h"
+#include "file_operations.h"
 #include <string.h>
-#include <unistd.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <errno.h>
-#include <time.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
-static bool create_backup_directory(char* backup_path, size_t size) {
-   char date_str[20];
-   time_t now = time(NULL);
-   struct tm *t = localtime(&now);
-   
-   // Format date for backup directory name
-   strftime(date_str, sizeof(date_str), "%Y-%m-%d_%H-%M-%S", t);
-   
-   // Create path for backup directory
-   snprintf(backup_path, size, "%s/backup_%s", BACKUP_DIR, date_str);
-   
-   // Create directory
-   if (mkdir(backup_path, 0755) == -1) {
-       log_message(LOG_ERROR, "Failed to create backup directory %s: %s", 
-                  backup_path, strerror(errno));
-       return false;
-   }
-   
-   log_message(LOG_INFO, "Created backup directory: %s", backup_path);
-   return true;
-}
+/**
+ * Backup the dashboard directory
+ * @return SUCCESS on success, FAILURE on error
+ */
+int backup_dashboard(void) {
+    char backup_path[MAX_PATH_LENGTH];
+    char timestamp[MAX_TIME_LENGTH];
+    time_t now;
+    struct tm *tm_info;
+    DIR *dir;
+    struct dirent *entry;
+    char src_path[MAX_PATH_LENGTH];
+    char dest_path[MAX_PATH_LENGTH];
+    int success_count = 0;
+    int file_count = 0;
+    
+    log_operation("Starting dashboard backup");
+    
+    /* Get current time for backup folder name */
+    now = time(NULL);
+    tm_info = localtime(&now);
+    strftime(timestamp, MAX_TIME_LENGTH, "%Y-%m-%d_%H-%M-%S", tm_info);
+    
+    /* Create backup directory with timestamp */
+    snprintf(backup_path, MAX_PATH_LENGTH, "%s/backup_%s", BACKUP_DIR, timestamp);
+    if (mkdir(backup_path, 0755) != 0) {
+        log_error("Failed to create backup directory: %s", strerror(errno));
+        return FAILURE;
+    }
+    
+    /* Open dashboard directory */
+    dir = opendir(DASHBOARD_DIR);
+    if (dir == NULL) {
+        log_error("Failed to open dashboard directory: %s", strerror(errno));
+        return FAILURE;
+    }
+    
+    /* Process each file in the directory */
+    while ((entry = readdir(dir)) != NULL) {
+        struct stat st;
+        char full_path[MAX_PATH_LENGTH];
 
-static bool copy_file(const char* src_path, const char* dest_path) {
-   int src_fd, dest_fd;
-   char buffer[4096];
-   ssize_t bytes_read, bytes_written;
-   int total_bytes = 0;
-   
-   // Open source file for reading
-   src_fd = open(src_path, O_RDONLY);
-   if (src_fd == -1) {
-       log_message(LOG_ERROR, "Failed to open source file %s: %s", 
-                  src_path, strerror(errno));
-       return false;
-   }
-   
-   // Open destination file for writing
-   dest_fd = open(dest_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-   if (dest_fd == -1) {
-       log_message(LOG_ERROR, "Failed to open destination file %s: %s", 
-                  dest_path, strerror(errno));
-       close(src_fd);
-       return false;
-   }
-   
-   // Copy file contents
-   while ((bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0) {
-       bytes_written = write(dest_fd, buffer, bytes_read);
-       if (bytes_written != bytes_read) {
-           log_message(LOG_ERROR, "Failed to write to destination file %s: %s", 
-                      dest_path, strerror(errno));
-           close(src_fd);
-           close(dest_fd);
-           return false;
-       }
-       total_bytes += bytes_written;
-   }
-   
-   // Check for read error
-   if (bytes_read == -1) {
-       log_message(LOG_ERROR, "Failed to read from source file %s: %s", 
-                  src_path, strerror(errno));
-       close(src_fd);
-       close(dest_fd);
-       return false;
-   }
-   
-   // Close file descriptors
-   close(src_fd);
-   close(dest_fd);
-   
-   log_message(LOG_DEBUG, "Backed up file %s to %s (%d bytes)", 
-              src_path, dest_path, total_bytes);
-   return true;
+        /* Skip directory entries */
+        snprintf(full_path, sizeof(full_path), "%s/%s", DASHBOARD_DIR, entry->d_name);
+        
+        /* Use stat to check if it's a directory */
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        
+        /* Skip special directory entries */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        /* Construct source and destination paths */
+        snprintf(src_path, MAX_PATH_LENGTH, "%s/%s", DASHBOARD_DIR, entry->d_name);
+        snprintf(dest_path, MAX_PATH_LENGTH, "%s/%s", backup_path, entry->d_name);
+        
+        /* Copy the file */
+        file_count++;
+        if (copy_file(src_path, dest_path) == SUCCESS) {
+            success_count++;
+        } else {
+            log_error("Failed to backup file: %s", entry->d_name);
+        }
+    }
+    
+    closedir(dir);
+    
+    /* Log result */
+    if (success_count == file_count) {
+        log_operation("Backup completed successfully: %d files", success_count);
+        return SUCCESS;
+    } else {
+        log_error("Backup partially completed: %d/%d files", success_count, file_count);
+        return (success_count > 0) ? SUCCESS : FAILURE;
+    }
 }
-
-TaskStatus backup_reporting_directory(void) {
-   log_message(LOG_INFO, "Starting backup operation");
-   
-   // Lock directories
-   if (lock_directories() != LOCK_SUCCESS) {
-       log_message(LOG_ERROR, "Failed to lock directories for backup");
-       return TASK_FAILURE;
-   }
-   
-   // Report task in progress
-   report_task_status(TASK_BACKUP, TASK_IN_PROGRESS);
-   
-   // Create backup directory
-   char backup_path[512];
-   if (!create_backup_directory(backup_path, sizeof(backup_path))) {
-       unlock_directories();
-       report_task_status(TASK_BACKUP, TASK_FAILURE);
-       return TASK_FAILURE;
-   }
-   
-   bool success = true;
-   int file_count = 0;
-   
-   // Open reporting directory
-   DIR *dir = opendir(REPORT_DIR);
-   if (dir == NULL) {
-       log_message(LOG_ERROR, "Failed to open reporting directory: %s", strerror(errno));
-       unlock_directories();
-       report_task_status(TASK_BACKUP, TASK_FAILURE);
-       return TASK_FAILURE;
-   }
-   
-   // Read directory entries
-   struct dirent *entry;
-   while ((entry = readdir(dir)) != NULL) {
-       // Skip "." and ".."
-       if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-           continue;
-       }
-       
-       // Only backup XML files
-       if (!is_xml_file(entry->d_name)) {
-           continue;
-       }
-       
-       // Create full paths
-       char src_path[1024];
-       char dest_path[1024];
-       snprintf(src_path, sizeof(src_path), "%s/%s", REPORT_DIR, entry->d_name);
-       snprintf(dest_path, sizeof(dest_path), "%s/%s", backup_path, entry->d_name);
-       
-       // Copy file
-       if (!copy_file(src_path, dest_path)) {
-           success = false;
-           log_message(LOG_ERROR, "Failed to backup file %s", src_path);
-       } else {
-           file_count++;
-       }
-   }
-   
-   closedir(dir);
-   
-   // Unlock directories
-   if (unlock_directories() != UNLOCK_SUCCESS) {
-       log_message(LOG_ERROR, "Failed to unlock directories after backup");
-       success = false;
-   }
-   
-   // Report task status
-   TaskStatus status = success ? TASK_SUCCESS : TASK_FAILURE;
-   report_task_status(TASK_BACKUP, status);
-   
-   log_message(LOG_INFO, "Backup operation %s, %d files backed up", 
-              success ? "completed successfully" : "failed", file_count);
-   
-   return status;
-}
+ 
+ /**
+  * Lock directories during backup/transfer operations
+  * @return SUCCESS on success, FAILURE on error
+  */
+ int lock_directories(void) {
+     int result = SUCCESS;
+     
+     log_operation("Locking directories for backup/transfer");
+     
+     /* Change permissions to prevent modifications */
+     if (set_directory_permissions(UPLOAD_DIR, LOCKED_PERMISSIONS) != SUCCESS) {
+         log_error("Failed to lock upload directory");
+         result = FAILURE;
+     }
+     
+     if (set_directory_permissions(DASHBOARD_DIR, LOCKED_PERMISSIONS) != SUCCESS) {
+         log_error("Failed to lock dashboard directory");
+         result = FAILURE;
+     }
+     
+     return result;
+ }
+ 
+ /**
+  * Unlock directories after backup/transfer operations
+  * @return SUCCESS on success, FAILURE on error
+  */
+ int unlock_directories(void) {
+     int result = SUCCESS;
+     
+     log_operation("Unlocking directories after backup/transfer");
+     
+     /* Restore normal permissions */
+     if (set_directory_permissions(UPLOAD_DIR, UPLOAD_PERMISSIONS) != SUCCESS) {
+         log_error("Failed to unlock upload directory");
+         result = FAILURE;
+     }
+     
+     if (set_directory_permissions(DASHBOARD_DIR, DASHBOARD_PERMISSIONS) != SUCCESS) {
+         log_error("Failed to unlock dashboard directory");
+         result = FAILURE;
+     }
+     
+     return result;
+ }
+ 
+ /**
+  * Set directory permissions
+  * @param path Directory path
+  * @param mode Permission mode
+  * @return SUCCESS on success, FAILURE on error
+  */
+ int set_directory_permissions(const char* path, mode_t mode) {
+     if (chmod(path, mode) != 0) {
+         log_error("Failed to set permissions on %s: %s", path, strerror(errno));
+         return FAILURE;
+     }
+     
+     return SUCCESS;
+ }
+ 
+ /**
+  * Create directory if it doesn't exist
+  * @param path Directory path
+  * @return SUCCESS on success, FAILURE on error
+  */
+ int create_directory_if_not_exists(const char* path) {
+     struct stat st;
+     
+     /* Check if directory already exists */
+     if (stat(path, &st) == 0) {
+         if (S_ISDIR(st.st_mode)) {
+             return SUCCESS;
+         } else {
+             log_error("%s exists but is not a directory", path);
+             return FAILURE;
+         }
+     }
+     
+     /* Create the directory */
+     if (mkdir(path, 0755) != 0) {
+         log_error("Failed to create directory %s: %s", path, strerror(errno));
+         return FAILURE;
+     }
+     
+     log_operation("Created directory: %s", path);
+     return SUCCESS;
+ }
+ 
+ /**
+  * Check if a directory is empty
+  * @param path Directory path
+  * @return TRUE if empty, FALSE if not empty or error
+  */
+ int is_directory_empty(const char* path) {
+     DIR *dir;
+     struct dirent *entry;
+     int is_empty = TRUE;
+     
+     /* Open the directory */
+     dir = opendir(path);
+     if (dir == NULL) {
+         log_error("Failed to open directory %s: %s", path, strerror(errno));
+         return FALSE;
+     }
+     
+     /* Check for entries other than . and .. */
+     while ((entry = readdir(dir)) != NULL) {
+         if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+             is_empty = FALSE;
+             break;
+         }
+     }
+     
+     closedir(dir);
+     return is_empty;
+ }

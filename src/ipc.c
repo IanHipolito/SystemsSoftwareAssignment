@@ -1,105 +1,173 @@
-#include "../include/ipc.h"
-#include "../include/config.h"
-#include "../include/logging.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
+/**
+ * @file ipc.c
+ * @brief Implementation of inter-process communication functions
+ */
+
+#include "ipc.h"
+#include "utils.h"
 #include <errno.h>
+#include <sys/types.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <signal.h>
 
-// Message structure for IPC
-typedef struct {
-    long mtype;  // Message type
-    TaskStatus status;
-} TaskMessage;
+/* Static file descriptor for the FIFO */
+static int fifo_fd = -1;
 
-static int msgid = -1;
-
-bool init_ipc(void) {
-    // Create message queue
-    msgid = msgget(IPC_KEY, IPC_CREAT | IPC_PERMS);
-    if (msgid == -1) {
-        log_message(LOG_ERROR, "Failed to create message queue: %s", strerror(errno));
-        return false;
-    }
-    
-    log_message(LOG_INFO, "IPC message queue initialized");
-    return true;
-}
-
-void cleanup_ipc(void) {
-    if (msgid != -1) {
-        // Remove message queue
-        if (msgctl(msgid, IPC_RMID, NULL) == -1) {
-            log_message(LOG_ERROR, "Failed to remove message queue: %s", strerror(errno));
-        } else {
-            log_message(LOG_INFO, "IPC message queue removed");
-        }
-    }
-}
-
-bool report_task_status(TaskType type, TaskStatus status) {
-    if (msgid == -1) {
-        log_message(LOG_ERROR, "IPC not initialized");
-        return false;
-    }
-    
-    TaskMessage msg;
-    msg.mtype = type + 1;  // Message type must be > 0
-    msg.status = status;
-    
-    // Send message
-    if (msgsnd(msgid, &msg, sizeof(TaskStatus), 0) == -1) {
-        log_message(LOG_ERROR, "Failed to send task status: %s", strerror(errno));
-        return false;
-    }
-    
-    const char* task_names[] = {"File Transfer", "Backup", "File Check"};
-    const char* status_names[] = {"Success", "Failure", "In Progress"};
-    
-    log_message(LOG_INFO, "Task status reported: %s - %s", 
-                task_names[type], status_names[status]);
-    return true;
-}
-
-TaskStatus get_task_status(TaskType type) {
-    if (msgid == -1) {
-        log_message(LOG_ERROR, "IPC not initialized");
-        return TASK_FAILURE;
-    }
-    
-    TaskMessage msg;
-    
-    // Receive message (non-blocking)
-    if (msgrcv(msgid, &msg, sizeof(TaskStatus), type + 1, IPC_NOWAIT) == -1) {
-        if (errno == ENOMSG) {
-            // No message available
-            return TASK_IN_PROGRESS;
-        } else {
-            log_message(LOG_ERROR, "Failed to receive task status: %s", strerror(errno));
-            return TASK_FAILURE;
+/**
+ * Setup IPC mechanisms
+ * @return SUCCESS on success, FAILURE on error
+ */
+int setup_ipc(void) {
+    /* Create FIFO if it doesn't exist */
+    if (access(FIFO_PATH, F_OK) != 0) {
+        if (mkfifo(FIFO_PATH, 0666) != 0) {
+            log_error("Failed to create FIFO: %s", strerror(errno));
+            return FAILURE;
         }
     }
     
-    return msg.status;
+    /* Open FIFO for both reading and writing */
+    fifo_fd = open(FIFO_PATH, O_RDWR | O_NONBLOCK);
+    if (fifo_fd == -1) {
+        log_error("Failed to open FIFO: %s", strerror(errno));
+        return FAILURE;
+    }
+    
+    log_operation("IPC setup completed");
+    return SUCCESS;
 }
 
-TaskStatus wait_for_task_completion(TaskType type) {
-    if (msgid == -1) {
-        log_message(LOG_ERROR, "IPC not initialized");
-        return TASK_FAILURE;
+/**
+ * Cleanup IPC resources
+ * @return SUCCESS on success, FAILURE on error
+ */
+int cleanup_ipc(void) {
+    int result = SUCCESS;
+    
+    /* Close FIFO if open */
+    if (fifo_fd != -1) {
+        if (close(fifo_fd) != 0) {
+            log_error("Failed to close FIFO: %s", strerror(errno));
+            result = FAILURE;
+        }
+        fifo_fd = -1;
     }
     
-    TaskMessage msg;
-    
-    // Receive message (blocking)
-    if (msgrcv(msgid, &msg, sizeof(TaskStatus), type + 1, 0) == -1) {
-        log_message(LOG_ERROR, "Failed to receive task status: %s", strerror(errno));
-        return TASK_FAILURE;
+    /* Remove FIFO */
+    if (unlink(FIFO_PATH) != 0 && errno != ENOENT) {
+        log_error("Failed to remove FIFO: %s", strerror(errno));
+        result = FAILURE;
     }
     
-    return msg.status;
+    log_operation("IPC cleanup completed");
+    return result;
+}
+
+/**
+ * Send an IPC message
+ * @param msg Pointer to the message to send
+ * @return SUCCESS on success, FAILURE on error
+ */
+int send_ipc_message(IPCMessage* msg) {
+    ssize_t bytes_written;
+    
+    /* Check if FIFO is open */
+    if (fifo_fd == -1) {
+        log_error("FIFO not open for sending message");
+        return FAILURE;
+    }
+    
+    /* Set the sender PID */
+    msg->sender_pid = getpid();
+    
+    /* Write the message to the FIFO */
+    bytes_written = write(fifo_fd, msg, sizeof(IPCMessage));
+    if (bytes_written != sizeof(IPCMessage)) {
+        log_error("Failed to write to FIFO: %s", strerror(errno));
+        return FAILURE;
+    }
+    
+    return SUCCESS;
+}
+
+/**
+ * Receive an IPC message (non-blocking)
+ * @param msg Pointer to store the received message
+ * @return SUCCESS on success, FAILURE on error or no message available
+ */
+int receive_ipc_message(IPCMessage* msg) {
+    ssize_t bytes_read;
+    
+    /* Check if FIFO is open */
+    if (fifo_fd == -1) {
+        log_error("FIFO not open for receiving message");
+        return FAILURE;
+    }
+    
+    /* Try to read a message from the FIFO */
+    bytes_read = read(fifo_fd, msg, sizeof(IPCMessage));
+    
+    /* Check for errors or no data */
+    if (bytes_read == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* No message available (non-blocking) */
+            return FAILURE;
+        } else {
+            log_error("Failed to read from FIFO: %s", strerror(errno));
+            return FAILURE;
+        }
+    } else if (bytes_read != sizeof(IPCMessage)) {
+        /* Partial read */
+        log_error("Partial read from FIFO: %ld bytes", (long)bytes_read);
+        return FAILURE;
+    }
+    
+    return SUCCESS;
+}
+
+/**
+ * Create a process that will report back its completion status
+ * @param function Function to execute in the child process
+ * @param msg_type Message type for completion notification
+ * @return PID of the child process or -1 on error
+ */
+pid_t create_reporting_process(int (*function)(void), int msg_type) {
+    pid_t pid;
+    
+    /* Fork a new process */
+    pid = fork();
+    
+    if (pid < 0) {
+        /* Fork failed */
+        log_error("Failed to fork process: %s", strerror(errno));
+        return -1;
+    } else if (pid == 0) {
+        /* Child process */
+        IPCMessage msg;
+        int result;
+        
+        /* Execute the function */
+        result = function();
+        
+        /* Prepare completion message */
+        msg.type = msg_type;
+        msg.sender_pid = getpid();
+        msg.status = result;
+        
+        if (result == SUCCESS) {
+            strcpy(msg.message, "Operation completed successfully");
+        } else {
+            strcpy(msg.message, "Operation failed");
+        }
+        
+        /* Send the completion message */
+        send_ipc_message(&msg);
+        
+        /* Exit with the result code */
+        exit(result == SUCCESS ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+    
+    /* Parent process - return the child's PID */
+    return pid;
 }
