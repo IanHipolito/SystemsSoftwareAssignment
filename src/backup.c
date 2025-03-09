@@ -24,12 +24,17 @@ static bool create_backup_directory(char* backup_path, size_t size) {
    // Create path for backup directory
    snprintf(backup_path, size, "%s/backup_%s", BACKUP_DIR, date_str);
    
-   // Create directory
-   if (mkdir(backup_path, 0755) == -1) {
+   log_message(DAEMON_LOG_DEBUG, "Attempting to create backup directory: %s", backup_path);
+   
+   // Create directory with full permissions
+   if (mkdir(backup_path, 0777) == -1) {
        log_message(DAEMON_LOG_ERROR, "Failed to create backup directory %s: %s", 
                   backup_path, strerror(errno));
        return false;
    }
+   
+   // Explicitly set permissions in case umask affected creation
+   chmod(backup_path, 0777);
    
    log_message(DAEMON_LOG_INFO, "Created backup directory: %s", backup_path);
    return true;
@@ -90,79 +95,118 @@ static bool copy_file(const char* src_path, const char* dest_path) {
 }
 
 TaskStatus backup_reporting_directory(void) {
-   log_message(DAEMON_LOG_INFO, "Starting backup operation");
-   
-   // Lock directories
-   if (lock_directories() != LOCK_SUCCESS) {
-       log_message(DAEMON_LOG_ERROR, "Failed to lock directories for backup");
-       return TASK_FAILURE;
-   }
-   
-   // Report task in progress
-   report_task_status(TASK_BACKUP, TASK_IN_PROGRESS);
-   
-   // Create backup directory
-   char backup_path[512];
-   if (!create_backup_directory(backup_path, sizeof(backup_path))) {
-       unlock_directories();
-       report_task_status(TASK_BACKUP, TASK_FAILURE);
-       return TASK_FAILURE;
-   }
-   
-   bool success = true;
-   int file_count = 0;
-   
-   // Open reporting directory
-   DIR *dir = opendir(REPORT_DIR);
-   if (dir == NULL) {
-       log_message(DAEMON_LOG_ERROR, "Failed to open reporting directory: %s", strerror(errno));
-       unlock_directories();
-       report_task_status(TASK_BACKUP, TASK_FAILURE);
-       return TASK_FAILURE;
-   }
-   
-   // Read directory entries
-   struct dirent *entry;
-   while ((entry = readdir(dir)) != NULL) {
-       // Skip "." and ".."
-       if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-           continue;
-       }
-       
-       // Only backup XML files
-       if (!is_xml_file(entry->d_name)) {
-           continue;
-       }
-       
-       // Create full paths
-       char src_path[1024];
-       char dest_path[1024];
-       snprintf(src_path, sizeof(src_path), "%s/%s", REPORT_DIR, entry->d_name);
-       snprintf(dest_path, sizeof(dest_path), "%s/%s", backup_path, entry->d_name);
-       
-       // Copy file
-       if (!copy_file(src_path, dest_path)) {
-           success = false;
-           log_message(DAEMON_LOG_ERROR, "Failed to backup file %s", src_path);
-       } else {
-           file_count++;
-       }
-   }
-   
-   closedir(dir);
-   
-   // Unlock directories
-   if (unlock_directories() != UNLOCK_SUCCESS) {
-       log_message(DAEMON_LOG_ERROR, "Failed to unlock directories after backup");
-       success = false;
-   }
-   
-   // Report task status
-   TaskStatus status = success ? TASK_SUCCESS : TASK_FAILURE;
-   report_task_status(TASK_BACKUP, status);
-   
-   log_message(DAEMON_LOG_INFO, "Backup operation %s, %d files backed up", 
+    log_message(DAEMON_LOG_INFO, "Starting backup operation");
+    
+    // Check if backup directory exists
+    struct stat st = {0};
+    if (stat(BACKUP_DIR, &st) == -1) {
+        log_message(DAEMON_LOG_ERROR, "Backup directory %s does not exist", BACKUP_DIR);
+        if (mkdir(BACKUP_DIR, 0777) == -1) {
+            log_message(DAEMON_LOG_ERROR, "Failed to create backup directory: %s", strerror(errno));
+            return TASK_FAILURE;
+        }
+        log_message(DAEMON_LOG_INFO, "Created backup directory: %s", BACKUP_DIR);
+    }
+    
+    // Check permissions on backup directory
+    chmod(BACKUP_DIR, 0777);
+    log_message(DAEMON_LOG_DEBUG, "Set permissions on backup directory to 0777");
+    
+    // Lock directories
+    if (lock_directories() != LOCK_SUCCESS) {
+        log_message(DAEMON_LOG_ERROR, "Failed to lock directories for backup");
+        return TASK_FAILURE;
+    }
+    
+    // Report task in progress
+    report_task_status(TASK_BACKUP, TASK_IN_PROGRESS);
+    
+    // Create backup directory
+    char backup_path[512];
+    if (!create_backup_directory(backup_path, sizeof(backup_path))) {
+        log_message(DAEMON_LOG_ERROR, "Failed to create timestamped backup directory");
+        unlock_directories();
+        report_task_status(TASK_BACKUP, TASK_FAILURE);
+        return TASK_FAILURE;
+    }
+    
+    bool success = true;
+    int file_count = 0;
+    
+    // Open reporting directory
+    DIR *dir = opendir(REPORT_DIR);
+    if (dir == NULL) {
+        log_message(DAEMON_LOG_ERROR, "Failed to open reporting directory: %s", strerror(errno));
+        unlock_directories();
+        report_task_status(TASK_BACKUP, TASK_FAILURE);
+        return TASK_FAILURE;
+    }
+    
+    // Check if reporting directory is empty
+    bool is_empty = true;
+    struct dirent *test_entry;
+    while ((test_entry = readdir(dir)) != NULL) {
+        if (strcmp(test_entry->d_name, ".") != 0 && strcmp(test_entry->d_name, "..") != 0) {
+            is_empty = false;
+            break;
+        }
+    }
+    
+    // Reset directory pointer
+    rewinddir(dir);
+    
+    if (is_empty) {
+        log_message(DAEMON_LOG_WARNING, "Reporting directory is empty, nothing to backup");
+        closedir(dir);
+        unlock_directories();
+        report_task_status(TASK_BACKUP, TASK_SUCCESS);  // Still mark as success
+        return TASK_SUCCESS;
+    }
+    
+    // Read directory entries
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip "." and ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        // Only backup XML files
+        if (!is_xml_file(entry->d_name)) {
+            continue;
+        }
+        
+        // Create full paths
+        char src_path[1024];
+        char dest_path[1024];
+        snprintf(src_path, sizeof(src_path), "%s/%s", REPORT_DIR, entry->d_name);
+        snprintf(dest_path, sizeof(dest_path), "%s/%s", backup_path, entry->d_name);
+        
+        log_message(DAEMON_LOG_DEBUG, "Backing up %s to %s", src_path, dest_path);
+        
+        // Copy file
+        if (!copy_file(src_path, dest_path)) {
+            success = false;
+            log_message(DAEMON_LOG_ERROR, "Failed to backup file %s", src_path);
+        } else {
+            file_count++;
+        }
+    }
+    
+    closedir(dir);
+    
+    // Unlock directories
+    if (unlock_directories() != UNLOCK_SUCCESS) {
+        log_message(DAEMON_LOG_ERROR, "Failed to unlock directories after backup");
+        success = false;
+    }
+    
+    // Report task status
+    TaskStatus status = success ? TASK_SUCCESS : TASK_FAILURE;
+    report_task_status(TASK_BACKUP, status);
+    
+    log_message(DAEMON_LOG_INFO, "Backup operation %s, %d files backed up", 
               success ? "completed successfully" : "failed", file_count);
-   
-   return status;
+    
+    return status;
 }

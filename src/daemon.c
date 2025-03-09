@@ -265,8 +265,9 @@ static void perform_transfer_and_backup(void) {
     // Perform transfer
     TaskStatus transfer_status = transfer_files();
     
-    // If transfer successful, perform backup
+    // Check transfer status explicitly
     if (transfer_status == TASK_SUCCESS) {
+        log_message(DAEMON_LOG_INFO, "Transfer completed successfully, starting backup");
         TaskStatus backup_status = backup_reporting_directory();
         
         if (backup_status == TASK_SUCCESS) {
@@ -275,7 +276,7 @@ static void perform_transfer_and_backup(void) {
             log_message(DAEMON_LOG_ERROR, "Scheduled backup failed");
         }
     } else {
-        log_message(DAEMON_LOG_ERROR, "Scheduled transfer failed");
+        log_message(DAEMON_LOG_ERROR, "Scheduled transfer failed, skipping backup");
     }
 }
 

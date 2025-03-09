@@ -70,12 +70,14 @@ static bool copy_file(const char* src_path, const char* dest_path) {
 static bool process_department_directory(const char* department) {
     bool success = true;
     char dept_path[512];
-    //char report_path[512];
     DIR *dir;
     struct dirent *entry;
+    int files_processed = 0;
     
     // Create department path
     snprintf(dept_path, sizeof(dept_path), "%s/%s", UPLOAD_DIR, department);
+    
+    log_message(DAEMON_LOG_DEBUG, "Processing department: %s", department);
     
     // Open directory
     dir = opendir(dept_path);
@@ -84,6 +86,8 @@ static bool process_department_directory(const char* department) {
                     dept_path, strerror(errno));
         return false;
     }
+    
+    log_message(DAEMON_LOG_DEBUG, "Opened directory %s for processing", dept_path);
     
     // Process each file in directory
     while ((entry = readdir(dir)) != NULL) {
@@ -108,6 +112,7 @@ static bool process_department_directory(const char* department) {
             success = false;
             log_message(DAEMON_LOG_ERROR, "Failed to transfer file %s", src_path);
         } else {
+            files_processed++;
             char username[256];
             get_file_owner(src_path, username, sizeof(username));
             log_file_change(username, dest_path, "transferred");
@@ -115,6 +120,8 @@ static bool process_department_directory(const char* department) {
     }
     
     closedir(dir);
+    log_message(DAEMON_LOG_INFO, "Department %s processed: %d files transferred", 
+                department, files_processed);
     return success;
 }
 
@@ -131,18 +138,37 @@ TaskStatus transfer_files(void) {
     report_task_status(TASK_TRANSFER, TASK_IN_PROGRESS);
     
     bool success = true;
+    int total_files = 0;
     
     // Process each department directory
     for (int i = 0; i < NUM_DEPARTMENTS; i++) {
         if (!process_department_directory(DEPARTMENTS[i])) {
             success = false;
+            log_message(DAEMON_LOG_WARNING, "Failed to process department: %s", DEPARTMENTS[i]);
         }
+    }
+    
+    // Check reporting directory has files
+    DIR *report_dir = opendir(REPORT_DIR);
+    if (report_dir != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(report_dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                total_files++;
+            }
+        }
+        closedir(report_dir);
+        log_message(DAEMON_LOG_INFO, "Reporting directory contains %d files after transfer", total_files);
+    } else {
+        log_message(DAEMON_LOG_ERROR, "Failed to open reporting directory to check file count");
     }
     
     // Unlock directories
     if (unlock_directories() != UNLOCK_SUCCESS) {
         log_message(DAEMON_LOG_ERROR, "Failed to unlock directories after transfer");
         success = false;
+    } else {
+        log_message(DAEMON_LOG_DEBUG, "Directories successfully unlocked after transfer");
     }
     
     // Report task status
