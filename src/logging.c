@@ -8,144 +8,34 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <errno.h>
 #include <syslog.h>
 #include <dirent.h>
-#include <pwd.h>
-#include <sys/types.h>
-#include <fcntl.h>
-
-// Define PATH_MAX if not already defined
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
 
 #define MAX_LOG_LINE 1024
-#define LOG_FILENAME "company_daemon.log"
-#define CHANGE_LOG_FILENAME "company_changes.log"
 
 static FILE *log_file = NULL;
 static FILE *change_log_file = NULL;
 
-// Utility function to safely create log file path
-static void create_log_path(char *dest, size_t dest_size, const char *dir, const char *filename) {
-    // Ensure we have enough space for dir, '/', filename, and null terminator
-    size_t dir_len = dir ? strlen(dir) : 0;
-    size_t filename_len = strlen(filename);
-    
-    if (dir_len + filename_len + 2 > dest_size) {
-        // If path would be too long, just use filename
-        strncpy(dest, filename, dest_size);
-        dest[dest_size - 1] = '\0';
-        syslog(LOG_WARNING, "Log path too long, using fallback: %s", dest);
-        return;
-    }
-    
-    // Construct path safely
-    if (dir && dir[0] != '\0') {
-        snprintf(dest, dest_size, "%s/%s", dir, filename);
-    } else {
-        strncpy(dest, filename, dest_size);
-        dest[dest_size - 1] = '\0';
-    }
-}
-
 void init_logging(void) {
     // Open system log
-    openlog("company_daemon", LOG_PID | LOG_PERROR, LOG_DAEMON);
-
-    // Get current user details for debugging
-    uid_t uid = getuid();
-    struct passwd *pw = getpwuid(uid);
+    openlog("company_daemon", LOG_PID, LOG_DAEMON);
     
-    // Extensive logging about log file creation attempt
-    syslog(LOG_INFO, "Initializing logging for user: %s (UID: %d)", 
-           pw ? pw->pw_name : "unknown", uid);
-
-    // Print current working directory
-    char cwd[PATH_MAX];
-    cwd[0] = '\0';
-    if (getcwd(cwd, sizeof(cwd)) == NULL) {
-        syslog(LOG_WARNING, "Failed to get current working directory");
-        strcpy(cwd, ".");
+    // Open log files
+    log_file = fopen(LOG_FILE, "a");
+    if (log_file == NULL) {
+        syslog(LOG_ERR, "Failed to open log file: %s", LOG_FILE);
+        exit(EXIT_FAILURE);
     }
-
-    // Attempt to open/create log files with extensive error checking
-    int log_fd = open(LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (log_fd == -1) {
-        // Detailed error logging
-        syslog(LOG_ERR, "Failed to open main log file %s. Error: %s (errno: %d)", 
-               LOG_FILE, strerror(errno), errno);
-
-        // Check directory permissions
-        struct stat dir_stat;
-        if (stat("/var/log", &dir_stat) == -1) {
-            syslog(LOG_ERR, "Cannot stat /var/log directory: %s", strerror(errno));
-        } else {
-            syslog(LOG_INFO, "/var/log directory permissions: %o", dir_stat.st_mode & 0777);
-        }
-
-        // Try alternative log file location
-        char local_log_path[PATH_MAX];
-        create_log_path(local_log_path, sizeof(local_log_path), 
-                        cwd[0] ? cwd : ".", LOG_FILENAME);
-
-        log_fd = open(local_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
-        
-        if (log_fd == -1) {
-            syslog(LOG_CRIT, "Failed to create local log file %s. Error: %s", 
-                   local_log_path, strerror(errno));
-        } else {
-            syslog(LOG_WARNING, "Using local log file at %s", local_log_path);
-        }
+    
+    change_log_file = fopen(CHANGE_LOG_FILE, "a");
+    if (change_log_file == NULL) {
+        syslog(LOG_ERR, "Failed to open change log file: %s", CHANGE_LOG_FILE);
+        fclose(log_file);
+        exit(EXIT_FAILURE);
     }
-
-    // If we have a valid file descriptor, convert to FILE*
-    if (log_fd != -1) {
-        log_file = fdopen(log_fd, "a");
-        if (log_file == NULL) {
-            syslog(LOG_ERR, "Failed to convert log file descriptor to FILE*");
-            close(log_fd);
-        } else {
-            syslog(LOG_INFO, "Successfully opened log file");
-            fprintf(log_file, "=== Daemon Logging Started ===\n");
-            fflush(log_file);
-        }
-    }
-
-    // Similar process for change log file
-    int change_log_fd = open(CHANGE_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (change_log_fd == -1) {
-        syslog(LOG_ERR, "Failed to open change log file %s. Error: %s", 
-               CHANGE_LOG_FILE, strerror(errno));
-        
-        // Try local change log
-        char local_change_log_path[PATH_MAX];
-        create_log_path(local_change_log_path, sizeof(local_change_log_path), 
-                        cwd[0] ? cwd : ".", CHANGE_LOG_FILENAME);
-
-        change_log_fd = open(local_change_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
-        
-        if (change_log_fd == -1) {
-            syslog(LOG_CRIT, "Failed to create local change log file. Error: %s", strerror(errno));
-        } else {
-            syslog(LOG_WARNING, "Using local change log file");
-        }
-    }
-
-    // Convert change log file descriptor to FILE*
-    if (change_log_fd != -1) {
-        change_log_file = fdopen(change_log_fd, "a");
-        if (change_log_file == NULL) {
-            syslog(LOG_ERR, "Failed to convert change log file descriptor to FILE*");
-            close(change_log_fd);
-        } else {
-            syslog(LOG_INFO, "Successfully opened change log file");
-        }
-    }
-
-    // Final initialization logging
-    syslog(LOG_INFO, "Logging initialization complete");
+    
+    // Log daemon start
+    log_message(LOG_INFO, "Daemon started");
 }
 
 void close_logging(void) {
@@ -192,12 +82,12 @@ void log_message(LogLevel level, const char* format, ...) {
     // Write to syslog
     int syslog_priority;
     switch (level) {
-        case DAEMON_LOG_DEBUG:    syslog_priority = LOG_DEBUG;   break;
-        case DAEMON_LOG_INFO:     syslog_priority = LOG_INFO;    break;
-        case DAEMON_LOG_WARNING:  syslog_priority = LOG_WARNING; break;
-        case DAEMON_LOG_ERROR:    syslog_priority = LOG_ERR;     break;
-        case DAEMON_LOG_CRITICAL: syslog_priority = LOG_CRIT;    break;
-        default:                  syslog_priority = LOG_NOTICE;  break;
+        case LOG_DEBUG:    syslog_priority = LOG_DEBUG;   break;
+        case LOG_INFO:     syslog_priority = LOG_INFO;    break;
+        case LOG_WARNING:  syslog_priority = LOG_WARNING; break;
+        case LOG_ERROR:    syslog_priority = LOG_ERR;     break;
+        case LOG_CRIT: syslog_priority = LOG_CRIT;    break;
+        default:           syslog_priority = LOG_NOTICE;  break;
     }
     
     syslog(syslog_priority, "%s", message);

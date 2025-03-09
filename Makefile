@@ -63,23 +63,3 @@ uninstall:
 	@echo "Daemon uninstalled successfully"
 
 .PHONY: all directories clean install uninstall
-
-# Test setup target
-test-setup:
-	@echo "Setting up test environment..."
-	./setup_test.sh
-
-# Run for testing
-run: all
-	@echo "Starting daemon..."
-	./$(TARGET) start
-
-# Stop for testing
-stop:
-	@echo "Stopping daemon..."
-	./$(TARGET) stop
-
-# Test trigger
-trigger:
-	@echo "Triggering manual operation..."
-	./$(TARGET) trigger

@@ -2,7 +2,6 @@
 #define DAEMON_H
 
 #include <stdbool.h>
-#include <sys/types.h>
 
 // Daemon status
 typedef enum {
@@ -12,9 +11,6 @@ typedef enum {
     DAEMON_STOPPED,
     DAEMON_ERROR
 } DaemonStatus;
-
-// Get daemon PID
-pid_t get_daemon_pid(void);
 
 // Initialize and start the daemon
 bool start_daemon(void);

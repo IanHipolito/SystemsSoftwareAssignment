@@ -4,13 +4,13 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-// Log levels - renamed to avoid collision with syslog.h constants
+// Log levels
 typedef enum {
-    DAEMON_LOG_DEBUG,
-    DAEMON_LOG_INFO,
-    DAEMON_LOG_WARNING,
-    DAEMON_LOG_ERROR,
-    DAEMON_LOG_CRITICAL
+    LOG_DEBUG,
+    LOG_INFO,
+    LOG_WARNING,
+    LOG_ERROR,
+    LOG_CRIT
 } LogLevel;
 
 // Initialize logging
